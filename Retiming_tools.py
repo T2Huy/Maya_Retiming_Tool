@@ -1,7 +1,12 @@
-from functools import partial
+import traceback
+
+from PySide2 import QtCore, QtWidgets
+from shiboken2 import wrapInstance
 
 import maya.cmds as cmds
 import maya.mel as mel
+import maya.OpenMayaUI as omui
+import maya.OpenMaya as om
 
 class Retiming_Utils(object):
 
@@ -98,61 +103,108 @@ class Retiming_Utils(object):
     def get_last_keyframe_time(cls):
         return cls.find_keyframe("last")
 
-class RetimingUI(object):
+class RetimingUI(QtWidgets.QDialog):
 
-    WINDOW_NAME = "RetimingUIWindow"
     WINDOW_TITLE = "Retiming Tool"
 
-    ABSOlUTE_BUTTON_WIDTH = 70
-    RELATIVE_BUTTON_WIDTH = 65
+    ABSOlUTE_BUTTON_WIDTH = 50
+    RELATIVE_BUTTON_WIDTH = 64
+
+    RETIMING_PROPERTY_NAME = "retiming_data"
 
     @classmethod
-    def display(cls, development=False):
-        if cmds.window(cls.WINDOW_NAME, exists=True):
-            cmds.deleteUI(cls.WINDOW_NAME, window=True)
+    def maya_main_window(cls):
+        main_window_ptr = omui.MQtUtil.mainWindow()
+        return wrapInstance(int(main_window_ptr), QtWidgets.QWidget)
 
-        if development and cmds.windowPref(cls.WINDOW_NAME, exists=True):
-            cmds.windowPref(cls.WINDOW_NAME, remove=True)
+    def __init__(self):
+        super(RetimingUI, self).__init__(self.maya_main_window())
 
-        cls.main_window = cmds.window(cls.WINDOW_NAME, title=cls.WINDOW_TITLE, sizeable=False, minimizeButton=False, maximizeButton=False)
+        self.setWindowTitle(self.WINDOW_TITLE)
+        if cmds.about(ntOS=True):
+            self.setWindowFlags(self.windowFlags() ^ QtCore.Qt.WindowTitleHint)
+        elif cmds.about(macOS=True):
+            self.setWindowFlags(QtCore.Qt.Tool)
 
-        main_layout = cmds.formLayout(parent = cls.main_window)
-
-        absolute_retiming_layout = cmds.rowLayout(parent=main_layout, numberOfColumns=6)
-        cmds.formLayout(main_layout, e=True, attachForm=(absolute_retiming_layout, "top", 2))
-        cmds.formLayout(main_layout, e=True, attachForm=(absolute_retiming_layout, "left", 2))
-        cmds.formLayout(main_layout, e=True, attachForm=(absolute_retiming_layout, "right", 2))
-
-        for i in range(1,7):
-            label = f"{i}f"
-            cmd = partial(cls.retime, i, False)
-            cmds.button(parent=absolute_retiming_layout, label=label, width=cls.ABSOlUTE_BUTTON_WIDTH, command=cmd)
-
-        shift_left_layout = cmds.rowLayout(parent=main_layout, numberOfColumns=2)
-        cmds.formLayout(main_layout, e=True, attachControl=(shift_left_layout, "top", 2, absolute_retiming_layout))
-        cmds.formLayout(main_layout, e=True, attachForm=(shift_left_layout, "left", 2))
-
-        cmds.button(parent=shift_left_layout, label="-2f", width=cls.RELATIVE_BUTTON_WIDTH, command=partial(cls.retime, -2, True))
-        cmds.button(parent=shift_left_layout, label="-1f", width=cls.RELATIVE_BUTTON_WIDTH, command=partial(cls.retime, -1, True))
-
-        shift_right_layout = cmds.rowLayout(parent=main_layout, numberOfColumns=2)
-        cmds.formLayout(main_layout, e=True, attachControl=(shift_right_layout, "top", 2, absolute_retiming_layout))
-        cmds.formLayout(main_layout, e=True, attachControl=(shift_right_layout, "left", 48, shift_left_layout))
-
-        cmds.button(parent=shift_right_layout, label="+1f", width=cls.RELATIVE_BUTTON_WIDTH, command=partial(cls.retime, 1,True))
-        cmds.button(parent=shift_right_layout, label="+2f", width=cls.RELATIVE_BUTTON_WIDTH, command=partial(cls.retime, 2,True))
-
-        cls.move_to_next_cb = cmds.checkBox(parent=main_layout, label="Move to next Frame", value=False)
-        cmds.formLayout(main_layout, e=True, attachControl=(cls.move_to_next_cb, "top", 4, shift_left_layout))
-        cmds.formLayout(main_layout, e=True, attachForm=(cls.move_to_next_cb, "left", 2))
-
-        cmds.showWindow()
+        self.create_widgets()
+        self.create_layout()
+        self.create_connections()
 
     @classmethod
-    def retime(cls, value, incremental, *args):
-        move_to_next = cmds.checkBox(cls.move_to_next_cb, q=True, value=True)
-        Retiming_Utils.retime_keys(value, incremental, move_to_next)
+    def display(cls):
+        if not cls.dlg_instance:
+            cls.dlg_instance = RetimingUI()
 
+        if cls.dlg_instance.isHidden():
+            cls.dlg_instance.show()
+        else:
+            cls.dlg_instance.raise_()
+            cls.dlg_instance.activateWindow()
+
+
+    def create_widgets(self):
+        self.absolute_buttons = []
+        for i in range(1, 7):
+            btn = QtWidgets.QPushButton(f"{i}f")
+            btn.setFixedWidth(self.ABSOlUTE_BUTTON_WIDTH)
+            btn.setProperty(self.RETIMING_PROPERTY_NAME, [i, False])
+            self.absolute_buttons.append(btn)
+
+        self.relative_buttons = []
+        for i in [-2, -1, 1, 2]:
+            btn = QtWidgets.QPushButton(f"{i}f")
+            btn.setFixedWidth(self.RELATIVE_BUTTON_WIDTH)
+            btn.setProperty(self.RETIMING_PROPERTY_NAME, [i, True])
+            self.relative_buttons.append(btn)
+
+        self.move_to_next_cb = QtWidgets.QCheckBox("Move to Next Frame")
+
+    def create_layout(self):
+        absolute_retime_layout = QtWidgets.QHBoxLayout()
+        absolute_retime_layout.setSpacing(2)
+        for btn in self.absolute_buttons:
+            absolute_retime_layout.addWidget(btn)
+
+        relative_retime_layout = QtWidgets.QHBoxLayout()
+        relative_retime_layout.setSpacing(2)
+        for btn in self.relative_buttons:
+            relative_retime_layout.addWidget(btn)
+            if relative_retime_layout.count() == 2:
+                relative_retime_layout.addStretch()
+
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(2,2,2,2)
+        main_layout.setSpacing(2)
+        main_layout.addLayout(absolute_retime_layout)
+        main_layout.addLayout(relative_retime_layout)
+        main_layout.addWidget(self.move_to_next_cb)
+
+    def create_connections(self):
+        for btn in self.absolute_buttons:
+            btn.clicked.connect(self.retime)
+
+        for btn in self.relative_buttons:
+            btn.clicked.connect(self.retime)
+
+    def retime(self):
+        btn = self.sender()
+        if btn:
+            retiming_data = btn.property(self.RETIMING_PROPERTY_NAME)
+            move_to_next = self.move_to_next_cb.isChecked()
+
+            cmds.undoInfo(openChunk=True)
+            try:
+                Retiming_Utils.retime_keys(retiming_data[0], retiming_data[1], move_to_next)
+            except:
+                traceback.print_exc()
+                om.MGlobal.displayError("Retime error occurred.")
+            cmds.undoInfo(closeChunk=True)
 
 if __name__ == "__main__":
-    RetimingUI.display(development=True)
+    try:
+        retiming_tool_dialog.close()
+        retiming_tool_dialog.deleteLater()
+    except:
+        pass
+    retiming_tool_dialog = RetimingUI()
+    retiming_tool_dialog.show()
